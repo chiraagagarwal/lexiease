@@ -1,0 +1,7 @@
+{
+  "name": "LexiEase Reading Assistant",
+  "description": "Accessible personalized multisensory reading assistant with dyslexia support, calibration, text-to-speech synchronization, and custom typography.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
