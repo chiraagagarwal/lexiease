@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+psycopg2-binary
+firebase-admin
+python-dotenv
+alembic
+pydantic-settings
+pytest
+httpx

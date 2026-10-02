@@ -100,6 +100,7 @@ export interface Document {
   };
   customPreferences?: Partial<ReadingPreferences>; // per-document override
   status: 'completed' | 'processing' | 'error';
+  originalFile?: File | Blob; // The raw document file
 }
 
 export interface CalibrationOption {

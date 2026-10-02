@@ -302,8 +302,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [activeDocument]);
 
   // Auth mock
-  const loginUser = useCallback((user: User) => {
+  const loginUser = useCallback(async (user: User) => {
     setCurrentUser(user);
+    const prof = await profileService.getProfile();
+    setProfile(prof);
+    if (prof && prof.preferences) {
+      setPreferences(prof.preferences);
+    }
     setCurrentRoute('library');
   }, []);
 

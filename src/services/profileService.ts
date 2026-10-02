@@ -5,36 +5,54 @@ const PROFILE_STORAGE_KEY = 'lexiease_user_profile_v1';
 const CALIBRATED_STORAGE_KEY = 'lexiease_calibrated_profile_v1';
 
 class ProfileService {
-  private currentProfile: ReadingProfile;
+  private currentProfile: ReadingProfile | null = null;
 
-  constructor() {
-    this.currentProfile = this.loadProfile();
-  }
-
-  private loadProfile(): ReadingProfile {
-    try {
-      const stored = localStorage.getItem(PROFILE_STORAGE_KEY);
-      if (stored) {
-        return JSON.parse(stored);
-      }
-    } catch (e) {
-      console.warn('Failed to load profile from storage:', e);
-    }
-
-    const defaultProfile: ReadingProfile = {
-      id: 'profile_default',
-      userId: 'user_alex',
-      name: 'Alex (Personal Profile)',
-      preferences: { ...DEFAULT_READING_PREFERENCES },
-      updatedAt: new Date().toISOString()
+  private getAuthHeaders() {
+    const token = localStorage.getItem('lexiease_auth_token') || 'mock_token_user_alex';
+    return {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
     };
-
-    return defaultProfile;
   }
 
   public async getProfile(): Promise<ReadingProfile> {
-    await new Promise(r => setTimeout(r, 40));
-    return JSON.parse(JSON.stringify(this.currentProfile));
+    try {
+      const res = await fetch('/api/profile/', { headers: this.getAuthHeaders() });
+      if (!res.ok) throw new Error('Failed to fetch profile');
+      const data = await res.json();
+      
+      this.currentProfile = {
+        id: data.id ? `profile_${data.id}` : 'profile_default',
+        userId: data.user_id,
+        name: 'Alex Rivera',
+        preferences: { ...DEFAULT_READING_PREFERENCES, ...(data.preferences || {}) },
+        calibrationAnswers: data.calibrationAnswers,
+        calibratedAt: data.calibratedAt,
+        updatedAt: data.updatedAt
+      };
+      
+      try {
+        localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(this.currentProfile));
+      } catch (e) {}
+      
+      return this.currentProfile;
+    } catch (e) {
+      console.warn('Backend fetch failed, falling back to local storage:', e);
+      const stored = localStorage.getItem(PROFILE_STORAGE_KEY);
+      if (stored) {
+        this.currentProfile = JSON.parse(stored);
+        return this.currentProfile!;
+      }
+      
+      this.currentProfile = {
+        id: 'profile_default',
+        userId: 'user_alex',
+        name: 'Alex (Personal Profile)',
+        preferences: { ...DEFAULT_READING_PREFERENCES },
+        updatedAt: new Date().toISOString()
+      };
+      return this.currentProfile;
+    }
   }
 
   public async saveProfile(profile: ReadingProfile): Promise<ReadingProfile> {
@@ -42,6 +60,24 @@ class ProfileService {
       ...profile,
       updatedAt: new Date().toISOString()
     };
+    
+    try {
+      const res = await fetch('/api/profile/', {
+        method: 'PUT',
+        headers: this.getAuthHeaders(),
+        body: JSON.stringify({
+          preferences: this.currentProfile.preferences,
+          calibration_answers: this.currentProfile.calibrationAnswers
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        this.currentProfile.updatedAt = data.updatedAt;
+      }
+    } catch (e) {
+      console.warn('Failed to sync profile to backend:', e);
+    }
+    
     try {
       localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(this.currentProfile));
     } catch (e) {
@@ -51,34 +87,30 @@ class ProfileService {
   }
 
   public async updatePreferences(preferences: Partial<ReadingPreferences>): Promise<ReadingProfile> {
-    this.currentProfile.preferences = {
-      ...this.currentProfile.preferences,
+    if (!this.currentProfile) await this.getProfile();
+    this.currentProfile!.preferences = {
+      ...this.currentProfile!.preferences,
       ...preferences
     };
-    this.currentProfile.updatedAt = new Date().toISOString();
-    try {
-      localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(this.currentProfile));
-    } catch (e) {
-      console.warn('Failed to persist profile preferences:', e);
-    }
-    return this.currentProfile;
+    return this.saveProfile(this.currentProfile!);
   }
 
   public async saveCalibratedProfile(preferences: ReadingPreferences, answers: Record<string, string>): Promise<ReadingProfile> {
+    if (!this.currentProfile) await this.getProfile();
+    
     this.currentProfile = {
-      ...this.currentProfile,
+      ...this.currentProfile!,
       preferences: { ...preferences },
-      calibratedAt: new Date().toISOString(),
       calibrationAnswers: answers,
-      updatedAt: new Date().toISOString()
     };
+    
     try {
-      localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(this.currentProfile));
       localStorage.setItem(CALIBRATED_STORAGE_KEY, JSON.stringify(preferences));
     } catch (e) {
       console.warn('Failed to save calibrated settings:', e);
     }
-    return this.currentProfile;
+    
+    return this.saveProfile(this.currentProfile);
   }
 
   public async resetToCalibrated(): Promise<ReadingPreferences> {
