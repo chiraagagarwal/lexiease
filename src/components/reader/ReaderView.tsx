@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { ReadingContent } from './ReadingContent';
 import { OriginalDocumentView } from './OriginalDocumentView';
@@ -9,32 +9,34 @@ import { LanguageSelector } from './LanguageSelector';
 import { SimplificationModal } from './SimplificationModal';
 import { ReadingSessionSummaryModal } from './ReadingSessionSummaryModal';
 import { Button } from '../common/Button';
-import { 
-  Eye, 
-  EyeOff, 
-  Sliders, 
-  Sparkles, 
-  BookOpen, 
-  FileText, 
-  ChevronLeft, 
-  ChevronRight, 
-  Maximize2, 
-  Minimize2, 
-  PanelLeftClose, 
-  PanelLeftOpen, 
+import { aiService } from '../../services/aiService';
+import {
+  Eye,
+  EyeOff,
+  Sliders,
+  Sparkles,
+  BookOpen,
+  FileText,
+  ChevronLeft,
+  ChevronRight,
+  Maximize2,
+  Minimize2,
+  PanelLeftClose,
+  PanelLeftOpen,
   BarChart2,
   Volume2
 } from 'lucide-react';
 
 export const ReaderView: React.FC = () => {
-  const { 
-    activeDocument, 
-    activePageNumber, 
-    setActivePageNumber, 
-    viewMode, 
-    setViewMode, 
-    preferences, 
-    updatePreferences, 
+  const {
+    activeDocument,
+    setActiveDocument,
+    activePageNumber,
+    setActivePageNumber,
+    viewMode,
+    setViewMode,
+    preferences,
+    updatePreferences,
     ttsState,
     seekToWord,
     activeTranslatedText,
@@ -47,6 +49,8 @@ export const ReaderView: React.FC = () => {
 
   const [isLeftNavOpen, setIsLeftNavOpen] = useState<boolean>(true);
   const [isRightControlsOpen, setIsRightControlsOpen] = useState<boolean>(true);
+  const [isSimplifying, setIsSimplifying] = useState<boolean>(false);
+  const [simplificationError, setSimplificationError] = useState<string | null>(null);
 
   if (!activeDocument) {
     return (
@@ -68,6 +72,7 @@ export const ReaderView: React.FC = () => {
   const handlePrevPage = () => {
     if (activePageNumber > 1) {
       setActivePageNumber(activePageNumber - 1);
+      setSimplificationError(null);
     }
   };
 
@@ -75,6 +80,7 @@ export const ReaderView: React.FC = () => {
     if (activePageNumber < totalPages) {
       const nextPage = activePageNumber + 1;
       setActivePageNumber(nextPage);
+      setSimplificationError(null);
       const progress = Math.round((nextPage / totalPages) * 100);
       updateDocumentProgress(activeDocument.id, progress);
     }
@@ -116,7 +122,7 @@ export const ReaderView: React.FC = () => {
           <div className="flex items-center bg-[#FEF9EB] p-1 rounded-xl border border-[#D8CEB9] shadow-2xs">
             <button
               id="reader-view-original-btn"
-              onClick={() => setViewMode('original')}
+              onClick={() => { setViewMode('original'); setSimplificationError(null); }}
               className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
                 viewMode === 'original'
                   ? 'bg-[#26231E] text-[#FEF9EB] shadow-xs'
@@ -150,10 +156,41 @@ export const ReaderView: React.FC = () => {
             id="reader-simplify-btn"
             variant="outline"
             size="sm"
-            icon={<Sparkles className="w-3.5 h-3.5 text-[#D97706]" />}
-            onClick={() => setIsSimplificationModalOpen(true)}
+            icon={isSimplifying ? <span className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin shrink-0"></span> : <Sparkles className="w-3.5 h-3.5 text-[#D97706]" />}
+            onClick={async () => {
+              if (!activeDocument) return;
+              const pageIndex = activeDocument.pages.findIndex(p => p.pageNumber === activePageNumber);
+              if (pageIndex === -1) return;
+              const page = activeDocument.pages[pageIndex];
+
+              if (page.simplificationResult) {
+                setIsSimplificationModalOpen(true);
+                return;
+              }
+
+              setIsSimplifying(true);
+              setSimplificationError(null);
+              try {
+                const updatedPage = await aiService.simplifyPage(activeDocument.id, pageIndex);
+                if (updatedPage) {
+                  // Manually update activeDocument state without resetting page
+                  setActiveDocument(prev => {
+                    if (!prev) return null;
+                    const newPages = [...prev.pages];
+                    newPages[pageIndex] = updatedPage;
+                    return { ...prev, pages: newPages };
+                  });
+                }
+                setIsSimplificationModalOpen(true);
+              } catch (e: any) {
+                console.error('Failed to simplify:', e);
+                setSimplificationError(e.message || 'An unexpected error occurred during simplification. Please try again.');
+              } finally {
+                setIsSimplifying(false);
+              }
+            }}
           >
-            <span className="hidden md:inline">Simplify Text</span>
+            <span className="hidden md:inline">{isSimplifying ? 'Simplifying...' : 'Simplify Text'}</span>
           </Button>
 
           {/* Focus Mode Toggle */}
@@ -162,8 +199,8 @@ export const ReaderView: React.FC = () => {
             onClick={() => updatePreferences({ focusMode: !preferences.focusMode })}
             title={preferences.focusMode ? "Exit Focus Mode" : "Enter Distraction-Free Focus Mode"}
             className={`p-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all border ${
-              preferences.focusMode 
-                ? 'bg-[#26231E] text-[#FEF9EB] border-[#26231E]' 
+              preferences.focusMode
+                ? 'bg-[#26231E] text-[#FEF9EB] border-[#26231E]'
                 : 'bg-[#FEF9EB] text-[#524B40] border-[#E7DFCA] hover:bg-[#EFE8D6]'
             }`}
           >
@@ -265,7 +302,7 @@ export const ReaderView: React.FC = () => {
         )}
 
         {/* CENTER COLUMN: Reading Canvas Area (Dominant) */}
-        <main 
+        <main
           className="flex-1 overflow-y-auto px-4 sm:px-8 lg:px-12 py-8 flex flex-col items-center justify-start transition-colors"
           style={{
             backgroundColor: viewMode === 'personalized' ? preferences.backgroundColor : '#F1F5F9'
@@ -281,15 +318,23 @@ export const ReaderView: React.FC = () => {
                 totalPages={totalPages}
               />
             ) : (
-              <ReadingContent
-                page={currentPage}
-                preferences={preferences}
-                ttsState={ttsState}
-                translatedText={activeTranslatedText}
-                onWordClick={(wordIdx, word) => {
-                  seekToWord(wordIdx);
-                }}
-              />
+              <div className="w-full">
+                {simplificationError && (
+                  <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">
+                    <strong>Simplification failed:</strong> {simplificationError}
+                    <button className="ml-2 underline hover:text-red-900" onClick={() => setSimplificationError(null)}>Dismiss</button>
+                  </div>
+                )}
+                <ReadingContent
+                  page={currentPage}
+                  preferences={preferences}
+                  ttsState={ttsState}
+                  translatedText={activeTranslatedText}
+                  onWordClick={(wordIdx, word) => {
+                    seekToWord(wordIdx);
+                  }}
+                />
+              </div>
             )}
 
             {/* Pagination Controls */}

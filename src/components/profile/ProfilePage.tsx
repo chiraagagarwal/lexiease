@@ -1,43 +1,55 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
-import { ReadingPreferences, FontOption, ConfusablePair } from '../../types';
+import { ReadingPreferences, ReadingProfile, FontOption, ConfusablePair } from '../../types';
 import { READING_THEMES, SUPPORTED_LANGUAGES } from '../../data/themes';
 import { Slider } from '../common/Slider';
 import { ToggleSwitch } from '../common/ToggleSwitch';
 import { Button } from '../common/Button';
-import { 
-  User, 
-  Sparkles, 
-  Type, 
-  Palette, 
-  Volume2, 
-  Languages, 
-  RotateCcw, 
-  Save, 
-  Download, 
-  Upload, 
-  CheckCircle2, 
+import {
+  User,
+  Sparkles,
+  Type,
+  Palette,
+  Volume2,
+  Languages,
+  RotateCcw,
+  Save,
+  Download,
+  Upload,
+  CheckCircle2,
   Glasses,
   LogOut,
-  ShieldCheck
+  ShieldCheck,
+  AlertCircle,
+  Check
 } from 'lucide-react';
 import { profileService } from '../../services/profileService';
+import { validateProfileJSON } from '../../services/profileValidation';
 
 export const ProfilePage: React.FC = () => {
-  const { 
-    currentUser, 
-    logoutUser, 
-    preferences, 
-    updatePreferences, 
-    saveAsGlobalPreferences, 
-    resetToCalibratedSettings, 
-    resetToDefaultSettings, 
-    profile, 
-    setCurrentRoute 
+  const {
+    currentUser,
+    logoutUser,
+    preferences,
+    updatePreferences,
+    saveAsGlobalPreferences,
+    saveProfileChanges,
+    resetToCalibratedSettings,
+    resetToDefaultSettings,
+    profile,
+    setCurrentRoute
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'typography' | 'colors' | 'confusable' | 'audio' | 'calibration'>('typography');
   const [saveToast, setSaveToast] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [pendingImport, setPendingImport] = useState<{
+    filename: string;
+    preferences: ReadingPreferences;
+    profile: Partial<ReadingProfile>;
+  } | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fonts: Array<{ name: FontOption; label: string }> = [
     { name: 'Lexend', label: 'Lexend' },
@@ -48,6 +60,8 @@ export const ProfilePage: React.FC = () => {
     { name: 'Verdana', label: 'Verdana' }
   ];
 
+  const confusablePairs: ConfusablePair[] = ['b/d', 'p/q', 'm/w', 'n/u', 's/z'];
+
   const handleSave = async () => {
     await saveAsGlobalPreferences();
     setSaveToast('Reading Profile saved successfully!');
@@ -55,29 +69,125 @@ export const ProfilePage: React.FC = () => {
   };
 
   const handleExport = () => {
-    const jsonStr = profileService.exportProfileJSON();
+    const jsonStr = profileService.exportProfileJSON(profile, preferences);
     const blob = new Blob([jsonStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `LexiEase_Profile_${currentUser?.name || 'User'}.json`;
+    a.download = 'lexiease-reading-profile.json';
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportClick = () => {
+    setImportError(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        const validation = validateProfileJSON(text);
+        if (!validation.success) {
+          setImportError(validation.error);
+          setPendingImport(null);
+          return;
+        }
+
+        setImportError(null);
+        setPendingImport({
+          filename: file.name,
+          preferences: validation.preferences,
+          profile: validation.profile
+        });
+      } catch (err: any) {
+        setImportError(`Failed to parse file: ${err?.message || 'Invalid format'}`);
+        setPendingImport(null);
+      }
+    };
+    reader.onerror = () => {
+      setImportError('Failed to read the selected file from disk.');
+      setPendingImport(null);
+    };
+    reader.readAsText(file);
+  };
+
+  const handleConfirmImport = async () => {
+    if (!pendingImport) return;
+
+    try {
+      const baseProfile = profile || {
+        id: 'profile_default',
+        userId: currentUser?.id || 'user_guest',
+        name: currentUser?.name || 'Guest Reader',
+        preferences: preferences,
+        updatedAt: new Date().toISOString()
+      };
+
+      const fullProfile: ReadingProfile = {
+        ...baseProfile,
+        ...pendingImport.profile,
+        preferences: pendingImport.preferences,
+        updatedAt: new Date().toISOString()
+      };
+
+      await saveProfileChanges(fullProfile);
+      setPendingImport(null);
+      setSaveToast('Reading Profile imported and applied successfully!');
+      setTimeout(() => setSaveToast(null), 3000);
+    } catch (err: any) {
+      setImportError(`Failed to apply imported profile: ${err?.message || 'Unknown error'}`);
+      setPendingImport(null);
+    }
+  };
+
+  const handleCancelImport = () => {
+    setPendingImport(null);
   };
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 text-[#26231E]">
+      {/* Hidden Profile Import File Picker */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        accept=".json,application/json"
+        onChange={handleFileSelect}
+        className="hidden"
+        id="profile-import-file-input"
+        data-testid="profile-import-file-input"
+      />
+
       {/* Profile Header Card */}
       <div className="bg-[#FAF3E0] border border-[#E7DFCA] rounded-2xl p-6 sm:p-8 flex flex-wrap items-center justify-between gap-6 shadow-xs">
         <div className="flex items-center gap-4">
           <div className="w-16 h-16 rounded-2xl bg-[#26231E] text-[#FEF9EB] text-2xl font-bold flex items-center justify-center shadow-sm">
-            {currentUser?.avatar || 'AR'}
+            {currentUser?.avatar || (currentUser ? 'U' : 'GR')}
           </div>
           <div className="space-y-1">
             <h1 className="text-2xl font-bold text-[#1E1B18] tracking-tight">
-              {currentUser?.name || 'Alex Rivera'}
+              {currentUser?.name || (profile?.name && profile.name !== 'Alex Rivera' ? profile.name : 'Guest Reader')}
             </h1>
             <p className="text-xs text-[#706655]">
-              {currentUser?.email || 'alex@lexiease.org'} • Role: <span className="capitalize font-semibold text-[#1E1B18]">{currentUser?.role || 'student'}</span>
+              {currentUser ? (
+                <>
+                  {currentUser.email || 'authenticated'} • Role: <span className="capitalize font-semibold text-[#1E1B18]">{currentUser.role || 'student'}</span>
+                </>
+              ) : (
+                <>
+                  Guest Mode • Local Preferences (Saved on this device)
+                </>
+              )}
             </p>
             <div className="flex items-center gap-2 pt-1">
               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#FAF1DA] text-[#8C6D23] border border-[#E4D5AD]">
@@ -97,20 +207,44 @@ export const ProfilePage: React.FC = () => {
           <Button
             variant="outline"
             size="sm"
+            id="profile-export-btn"
+            data-testid="profile-export-btn"
             icon={<Download className="w-4 h-4" />}
             onClick={handleExport}
           >
-            Export JSON
+            Export Profile
           </Button>
 
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
-            icon={<LogOut className="w-4 h-4 text-[#DC2626]" />}
-            onClick={logoutUser}
+            id="profile-import-btn"
+            data-testid="profile-import-btn"
+            icon={<Upload className="w-4 h-4" />}
+            onClick={handleImportClick}
           >
-            Sign Out
+            Import Profile
           </Button>
+
+          {currentUser ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<LogOut className="w-4 h-4 text-[#DC2626]" />}
+              onClick={logoutUser}
+            >
+              Sign Out
+            </Button>
+          ) : (
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<ShieldCheck className="w-4 h-4" />}
+              onClick={() => setCurrentRoute('login')}
+            >
+              Sign In
+            </Button>
+          )}
         </div>
       </div>
 
@@ -184,6 +318,95 @@ export const ProfilePage: React.FC = () => {
           {saveToast && (
             <div className="p-3 rounded-xl bg-[#EDF5EC] border border-[#CBDBCB] text-xs text-[#047857] text-center font-bold animate-in fade-in">
               {saveToast}
+            </div>
+          )}
+
+          {/* Pending Import Confirmation Banner */}
+          {pendingImport && (
+            <div
+              id="import-confirmation-card"
+              data-testid="import-confirmation-card"
+              role="region"
+              aria-label="Confirm Profile Import"
+              className="p-5 rounded-2xl bg-[#FEF9EB] border-2 border-[#D97706] shadow-md space-y-4 animate-in fade-in"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <h4 className="text-sm font-bold text-[#1E1B18] flex items-center gap-2">
+                    <Upload className="w-4 h-4 text-[#D97706]" />
+                    Confirm Profile Import
+                  </h4>
+                  <p className="text-xs text-[#524B40]">
+                    Are you sure you want to replace your current reading preferences with settings from <strong className="text-[#1E1B18]">{pendingImport.filename}</strong>?
+                  </p>
+                </div>
+              </div>
+
+              {/* Preview Settings */}
+              <div className="p-3 bg-[#FAF3E0] rounded-xl grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <div>
+                  <span className="text-[10px] uppercase font-bold text-[#706655] block">Font</span>
+                  <span className="font-bold text-[#1E1B18]">{pendingImport.preferences.font}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-bold text-[#706655] block">Size & Line</span>
+                  <span className="font-bold text-[#1E1B18]">{pendingImport.preferences.fontSize}px / {pendingImport.preferences.lineSpacing}x</span>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-bold text-[#706655] block">Theme</span>
+                  <span className="font-bold text-[#1E1B18]">{pendingImport.preferences.themeId}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-bold text-[#706655] block">Confusables</span>
+                  <span className="font-bold text-[#1E1B18]">
+                    {pendingImport.preferences.confusableLetterSettings.enabled ? 'Enabled' : 'Disabled'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 pt-1">
+                <Button
+                  id="confirm-import-btn"
+                  variant="primary"
+                  size="sm"
+                  icon={<Check className="w-4 h-4" />}
+                  onClick={handleConfirmImport}
+                >
+                  Apply Imported Profile
+                </Button>
+                <Button
+                  id="cancel-import-btn"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleCancelImport}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Error Alert */}
+          {importError && (
+            <div
+              id="profile-error-alert"
+              role="alert"
+              className="p-4 rounded-xl bg-[#FEF2F2] border border-[#FCA5A5] text-xs text-[#DC2626] flex items-start justify-between gap-3 font-semibold animate-in fade-in"
+            >
+              <div className="space-y-0.5">
+                <p className="font-bold flex items-center gap-1.5">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-[#DC2626]" />
+                  Profile Import Error
+                </p>
+                <p className="font-normal text-[#991B1B]">{importError}</p>
+                <p className="text-[11px] text-[#706655] font-normal pt-1">Your current profile preferences were left unchanged.</p>
+              </div>
+              <button
+                onClick={() => setImportError(null)}
+                className="text-[#DC2626] hover:text-[#7F1D1D] font-bold text-xs px-2 py-1 rounded hover:bg-[#FEE2E2]"
+              >
+                Dismiss
+              </button>
             </div>
           )}
 
@@ -319,7 +542,7 @@ export const ProfilePage: React.FC = () => {
                     }`}
                     style={{ backgroundColor: theme.backgroundColor }}
                   >
-                    <div 
+                    <div
                       className="w-5 h-5 rounded-full border border-black/20 shrink-0 mt-0.5"
                       style={{ backgroundColor: theme.highlightColor }}
                     />
@@ -343,7 +566,7 @@ export const ProfilePage: React.FC = () => {
               <div>
                 <h3 className="text-lg font-bold text-[#1E1B18]">Confusable Letter Disambiguation</h3>
                 <p className="text-xs text-[#706655]">
-                  Helps differentiate mirror characters such as b/d, p/q, m/w, n/u.
+                  Helps differentiate mirror characters such as b/d, p/q, m/w, n/u, s/z.
                 </p>
               </div>
 
@@ -360,14 +583,53 @@ export const ProfilePage: React.FC = () => {
               />
 
               {preferences.confusableLetterSettings.enabled && (
-                <div className="p-4 bg-[#FEF9EB] border border-[#E7DFCA] rounded-2xl space-y-4">
-                  <h4 className="text-xs font-bold text-[#1E1B18] uppercase tracking-wider">
-                    Interactive Disambiguation Demo:
-                  </h4>
-                  <div className="p-4 bg-[#FAF3E0] rounded-xl text-base leading-relaxed">
-                    <p>
-                      "The <span className="font-black text-[#B45309]">b</span>old <span className="font-black text-[#047857]">d</span>og jumped over the <span className="font-black text-[#B45309]">p</span>ond <span className="font-black text-[#047857]">q</span>uickly, enjoying the <span className="font-black text-[#B45309]">w</span>arm <span className="font-black text-[#047857]">m</span>orning sunlight."
-                    </p>
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-[#1E1B18] uppercase tracking-wider">
+                      Active Letter Pairs
+                    </label>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {confusablePairs.map(pair => {
+                        const isActive = preferences.confusableLetterSettings.activePairs.includes(pair);
+                        return (
+                          <button
+                            key={pair}
+                            id={`confusable-pair-${pair.replace('/', '-')}`}
+                            onClick={() => {
+                              const current = preferences.confusableLetterSettings.activePairs;
+                              const next = isActive
+                                ? current.filter(p => p !== pair)
+                                : [...current, pair];
+                              updatePreferences({
+                                confusableLetterSettings: {
+                                  ...preferences.confusableLetterSettings,
+                                  activePairs: next
+                                }
+                              });
+                            }}
+                            className={`p-2.5 rounded-xl border flex items-center justify-between text-xs font-bold transition-all ${
+                              isActive
+                                ? 'bg-[#FEF9EB] border-[#D97706] text-[#D97706]'
+                                : 'bg-[#FEF9EB]/60 border-[#E7DFCA] text-[#706655]'
+                            }`}
+                          >
+                            <span className="font-mono text-sm tracking-wider">{pair}</span>
+                            {isActive && <Check className="w-3.5 h-3.5" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="p-4 bg-[#FEF9EB] border border-[#E7DFCA] rounded-2xl space-y-4">
+                    <h4 className="text-xs font-bold text-[#1E1B18] uppercase tracking-wider">
+                      Interactive Disambiguation Demo:
+                    </h4>
+                    <div className="p-4 bg-[#FAF3E0] rounded-xl text-base leading-relaxed">
+                      <p>
+                        "The <span className="font-black text-[#B45309]">b</span>old <span className="font-black text-[#047857]">d</span>og jumped over the <span className="font-black text-[#B45309]">p</span>ond <span className="font-black text-[#047857]">q</span>uickly, enjoying the <span className="font-black text-[#B45309]">w</span>arm <span className="font-black text-[#047857]">m</span>orning sunlight, while the <span className="font-black text-[#B45309]">s</span>un reached the hori<span className="font-black text-[#047857]">z</span>on."
+                      </p>
+                    </div>
                   </div>
                 </div>
               )}

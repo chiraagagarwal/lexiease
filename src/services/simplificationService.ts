@@ -1,3 +1,12 @@
+/**
+ * LEGACY / PROTOTYPE NOTICE:
+ * This standalone mock simplification service is preserved for offline unit demos
+ * and prototype reference only. It is NOT active in production user reading flows.
+ * Production AI simplification is actively performed by aiService.ts calling the
+ * FastAPI backend endpoint (/api/ai/simplify) with Gemini / generative AI models.
+ * Do not present outputs from this service as genuine AI output.
+ */
+
 export interface SimplifiedResult {
   originalText: string;
   simplifiedText: string;

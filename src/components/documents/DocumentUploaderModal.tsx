@@ -17,19 +17,10 @@ export const DocumentUploaderModal: React.FC = () => {
     setErrorMessage(null);
 
     try {
-      // Simulate realistic multi-stage mock OCR processing
-      await new Promise(r => setTimeout(r, 400));
-      setUploadStep('processing');
-      
-      await new Promise(r => setTimeout(r, 500));
-      setUploadStep('extracting');
-      
-      await new Promise(r => setTimeout(r, 450));
-      setUploadStep('formatting');
-
-      const doc = await uploadAndDigitise(file);
+      const doc = await uploadAndDigitise(file, (step) => {
+        setUploadStep(step);
+      });
       setCreatedDocId(doc.id);
-      setUploadStep('success');
     } catch (err: any) {
       console.warn('OCR error:', err);
       setUploadStep('error');
@@ -114,7 +105,8 @@ export const DocumentUploaderModal: React.FC = () => {
                 size="sm"
                 icon={<Sparkles className="w-3.5 h-3.5 text-[#D97706]" />}
                 onClick={() => {
-                  const blob = new Blob(["Sample Biology Document"], { type: "text/plain" });
+                  const samplePdfBytes = "%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length 51 >>\nstream\nBT /F1 12 Tf 72 712 Td (Sample Biology Document) Tj ET\nendstream\nendobj\nxref\n0 5\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000216 00000 n \ntrailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n317\n%%EOF";
+                  const blob = new Blob([samplePdfBytes], { type: "application/pdf" });
                   const file = new File([blob], "Biology_Cellular_Pollination.pdf", { type: "application/pdf" });
                   handleFileChange(file);
                 }}

@@ -1,55 +1,88 @@
 import React, { useState } from 'react';
 import { Modal } from '../common/Modal';
 import { Button } from '../common/Button';
-import { UploadCloud, FileCheck, ShieldAlert, Sparkles, ArrowRight, Check } from 'lucide-react';
+import { UploadCloud, FileCheck, ShieldAlert, Sparkles, Check, AlertCircle } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { aiService } from '../../services/aiService';
+import { ReadingPreferences } from '../../types';
 
 export const AssessmentUploadModal: React.FC = () => {
   const { isAssessmentModalOpen, setIsAssessmentModalOpen, updatePreferences, saveAsGlobalPreferences } = useApp();
   const [file, setFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [extractedNotes, setExtractedNotes] = useState<string[] | null>(null);
+  const [recommendations, setRecommendations] = useState<Partial<ReadingPreferences> | null>(null);
+  const [disclaimer, setDisclaimer] = useState<string | null>(null);
+  const [isFallback, setIsFallback] = useState(false);
   const [isConfirmed, setIsConfirmed] = useState(false);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const selected = e.target.files[0];
+      setErrorMsg(null);
+
+      // Validate file size (max 5MB)
+      if (selected.size > 5 * 1024 * 1024) {
+        setErrorMsg('The assessment document exceeds the 5MB size limit. Please upload a smaller file.');
+        return;
+      }
+
+      // Validate file extension
+      const validExts = ['.pdf', '.png', '.jpg', '.jpeg', '.webp'];
+      const fileExt = '.' + (selected.name.split('.').pop() || '').toLowerCase();
+      if (!validExts.includes(fileExt)) {
+        setErrorMsg('Unsupported file type. Please upload a PDF or image file (.pdf, .png, .jpg, .jpeg, .webp).');
+        return;
+      }
+
       setFile(selected);
       setIsProcessing(true);
 
-      // Simulate realistic mock processing of assessment document
-      setTimeout(() => {
+      try {
+        const result = await aiService.analyzeAssessment(selected);
+        setExtractedNotes(result.extractedNotes);
+        setRecommendations(result.recommendations);
+        setIsFallback(result.isFallback);
+        if (result.disclaimer) {
+          setDisclaimer(result.disclaimer);
+        }
+      } catch (err: any) {
+        setErrorMsg(err?.message || 'Failed to analyze assessment document. Please try again.');
+      } finally {
         setIsProcessing(false);
-        setExtractedNotes([
-          'Reader benefits from high letter spacing (+0.06em) to relieve optical crowding.',
-          'Warm yellow/cream background (#FEF9EB) advised to soften ocular glare.',
-          'Synchronized single-word audio pacing recommended for phoneme-to-text binding.',
-          'Subtle disambiguation enabled for mirror letters b/d and p/q.'
-        ]);
-      }, 1200);
+      }
     }
   };
 
   const handleApplyRecommendations = async () => {
-    updatePreferences({
-      letterSpacing: 0.06,
-      lineSpacing: 2.0,
-      wordSpacing: 0.14,
-      themeId: 'warm-cream',
-      backgroundColor: '#FEF9EB',
-      highlightMode: 'word',
-      confusableLetterSettings: {
-        enabled: true,
-        activePairs: ['b/d', 'p/q', 'm/w'],
-        style: 'weight'
-      }
-    });
+    if (recommendations) {
+      updatePreferences(recommendations);
+    } else {
+      updatePreferences({
+        font: 'OpenDyslexic',
+        letterSpacing: 0.06,
+        lineSpacing: 2.0,
+        wordSpacing: 0.14,
+        themeId: 'warm-cream',
+        backgroundColor: '#FEF9EB',
+        highlightMode: 'word',
+        confusableLetterSettings: {
+          enabled: true,
+          activePairs: ['b/d', 'p/q', 'm/w'],
+          style: 'weight'
+        }
+      });
+    }
     await saveAsGlobalPreferences();
     setIsConfirmed(true);
     setTimeout(() => {
       setIsConfirmed(false);
       setFile(null);
       setExtractedNotes(null);
+      setRecommendations(null);
+      setErrorMsg(null);
+      setIsFallback(false);
       setIsAssessmentModalOpen(false);
     }, 900);
   };
@@ -57,6 +90,9 @@ export const AssessmentUploadModal: React.FC = () => {
   const handleClose = () => {
     setFile(null);
     setExtractedNotes(null);
+    setRecommendations(null);
+    setErrorMsg(null);
+    setIsFallback(false);
     setIsProcessing(false);
     setIsAssessmentModalOpen(false);
   };
@@ -81,13 +117,20 @@ export const AssessmentUploadModal: React.FC = () => {
           </div>
         </div>
 
+        {errorMsg && (
+          <div className="p-3 bg-red-50 border border-red-200 rounded-xl flex items-center gap-2 text-xs text-red-700">
+            <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+            <span>{errorMsg}</span>
+          </div>
+        )}
+
         {!extractedNotes ? (
           <div className="space-y-4">
             {/* Drag and drop upload box */}
             <label className="block p-8 border-2 border-dashed border-[#D8CEB9] hover:border-[#8C7A5D] rounded-2xl text-center bg-[#FAF3E0] hover:bg-[#EFE8D6] transition-colors cursor-pointer">
               <input
                 type="file"
-                accept=".pdf,.doc,.docx,.png,.jpg,.jpeg"
+                accept=".pdf,.png,.jpg,.jpeg,.webp"
                 onChange={handleFileUpload}
                 className="hidden"
                 disabled={isProcessing}
@@ -97,10 +140,10 @@ export const AssessmentUploadModal: React.FC = () => {
                   <UploadCloud className="w-6 h-6" />
                 </div>
                 <p className="text-sm font-bold text-[#1E1B18]">
-                  {isProcessing ? 'Processing assessment document...' : 'Upload assessment PDF or Image'}
+                  {isProcessing ? 'Analyzing assessment document...' : 'Upload assessment PDF or Image'}
                 </p>
                 <p className="text-xs text-[#706655]">
-                  Accepts PDF, JPG, PNG from school psychologists or reading specialists
+                  Accepts PDF, JPG, PNG (up to 5MB) from school psychologists or reading specialists
                 </p>
               </div>
             </label>
@@ -118,10 +161,22 @@ export const AssessmentUploadModal: React.FC = () => {
         ) : (
           <div className="space-y-4">
             <div className="p-4 bg-[#FAF3E0] border border-[#E7DFCA] rounded-xl space-y-3">
-              <div className="flex items-center gap-2 text-xs font-bold text-[#047857]">
-                <FileCheck className="w-4 h-4" />
-                Extracted Guidance for Personalization
-              </div>
+              {isFallback ? (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 text-xs font-bold text-[#B45309]">
+                    <AlertCircle className="w-4 h-4 text-[#D97706]" />
+                    Standard Accommodation Presets (AI Offline)
+                  </div>
+                  <p className="text-[11px] text-[#78350F]">
+                    Live document analysis was unavailable. We have provided standard educational accommodation presets to relieve visual crowding and glare, which you can review and adjust below.
+                  </p>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-xs font-bold text-[#047857]">
+                  <FileCheck className="w-4 h-4" />
+                  Extracted Guidance from Assessment Document (AI Analyzed)
+                </div>
+              )}
               <ul className="space-y-2 text-xs text-[#3D372E]">
                 {extractedNotes.map((note, idx) => (
                   <li key={idx} className="flex items-start gap-2">
@@ -130,6 +185,11 @@ export const AssessmentUploadModal: React.FC = () => {
                   </li>
                 ))}
               </ul>
+              {disclaimer && (
+                <p className="text-[11px] text-[#706655] pt-2 border-t border-[#E7DFCA]">
+                  {disclaimer}
+                </p>
+              )}
             </div>
 
             <div className="flex items-center justify-end gap-3 pt-2">

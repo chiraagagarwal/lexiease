@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Modal } from '../common/Modal';
 import { Button } from '../common/Button';
 import { useApp } from '../../context/AppContext';
-import { simplificationService, SimplifiedResult } from '../../services/simplificationService';
+import { aiService } from '../../services/aiService';
+import { SimplifiedResult } from '../../types';
 import { Sparkles, ArrowRight, BookOpen, Check, ListChecks, HelpCircle } from 'lucide-react';
 import { LoadingState } from '../common/LoadingState';
 
@@ -15,17 +16,12 @@ export const SimplificationModal: React.FC = () => {
   const currentPage = activeDocument?.pages.find(p => p.pageNumber === activePageNumber) || activeDocument?.pages[0];
 
   useEffect(() => {
-    if (isSimplificationModalOpen && currentPage) {
-      setIsLoading(true);
-      simplificationService.simplify(currentPage.content).then(res => {
-        setSimplifiedResult(res);
-        setIsLoading(false);
-      }).catch(err => {
-        console.warn('Simplification failed:', err);
-        setIsLoading(false);
-      });
+    if (isSimplificationModalOpen && currentPage && activeDocument) {
+      if (currentPage.simplificationResult) {
+        setSimplifiedResult(currentPage.simplificationResult);
+      }
     }
-  }, [isSimplificationModalOpen, currentPage]);
+  }, [isSimplificationModalOpen, currentPage, activeDocument, activePageNumber]);
 
   return (
     <Modal

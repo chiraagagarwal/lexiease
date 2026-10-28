@@ -1,27 +1,30 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
-import { 
-  AppRoute, 
-  Document, 
-  ReadingPreferences, 
-  ReadingProfile, 
-  TTSState, 
-  User, 
-  ActiveViewMode, 
-  CalibrationResult 
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import {
+  AppRoute,
+  Document,
+  ReadingPreferences,
+  ReadingProfile,
+  TTSState,
+  User,
+  ActiveViewMode,
+  CalibrationResult
 } from '../types';
 import { DEFAULT_READING_PREFERENCES } from '../data/themes';
 import { documentService } from '../services/documentService';
 import { profileService } from '../services/profileService';
 import { ttsService } from '../services/ttsService';
-import { translationService } from '../services/translationService';
 import { calibrationService } from '../services/calibrationService';
 import { readingService } from '../services/readingService';
+import { aiService } from '../services/aiService';
+import { parseRouteFromHash, buildRouteHash } from '../services/routeUtils';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth } from '../lib/firebase';
 
 export interface AppContextType {
   // Navigation & UI State
   currentRoute: AppRoute;
   setCurrentRoute: (route: AppRoute) => void;
-  navigateToReader: (documentId: string) => void;
+  navigateToReader: (documentId: string, pageNumber?: number) => void;
   isSidebarOpen: boolean;
   setIsSidebarOpen: (open: boolean) => void;
   isControlsDrawerOpen: boolean;
@@ -35,14 +38,15 @@ export interface AppContextType {
   // Documents State
   documents: Document[];
   activeDocument: Document | null;
+  setActiveDocument: React.Dispatch<React.SetStateAction<Document | null>>;
   activePageNumber: number;
   setActivePageNumber: (page: number) => void;
   viewMode: ActiveViewMode;
   setViewMode: (mode: ActiveViewMode) => void;
   refreshDocuments: () => Promise<void>;
-  selectDocument: (id: string) => Promise<void>;
+  selectDocument: (id: string, pageNumber?: number) => Promise<void>;
   deleteDocument: (id: string) => Promise<void>;
-  uploadAndDigitise: (file: File) => Promise<Document>;
+  uploadAndDigitise: (file: File, onProgress?: (step: 'idle' | 'uploading' | 'processing' | 'extracting' | 'formatting' | 'success' | 'error') => void) => Promise<Document>;
   updateDocumentProgress: (docId: string, progress: number) => Promise<void>;
 
   // Reading Preferences State
@@ -101,13 +105,32 @@ const DEFAULT_USER: User = {
 };
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Navigation
-  const [currentRoute, setCurrentRoute] = useState<AppRoute>('landing');
+  // Navigation - initialize route from URL hash if available
+  const [currentRoute, setCurrentRoute] = useState<AppRoute>(() => {
+    if (typeof window !== 'undefined' && window.location.hash) {
+      return parseRouteFromHash().route;
+    }
+    return 'landing';
+  });
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
   const [isControlsDrawerOpen, setIsControlsDrawerOpen] = useState<boolean>(false);
 
-  // User
-  const [currentUser, setCurrentUser] = useState<User | null>(DEFAULT_USER);
+  // User state with localStorage persistence fallback
+  const [currentUser, setCurrentUser] = useState<User | null>(() => {
+    if (typeof window !== 'undefined') {
+      const isDevMock = localStorage.getItem('lexiease_dev_mock_user') === 'true';
+      if (isDevMock) {
+        return DEFAULT_USER;
+      }
+      const saved = localStorage.getItem('lexiease_current_user');
+      if (saved) {
+        try {
+          return JSON.parse(saved);
+        } catch {}
+      }
+    }
+    return null;
+  });
 
   // Documents
   const [documents, setDocuments] = useState<Document[]>([]);
@@ -144,13 +167,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isSessionSummaryOpen, setIsSessionSummaryOpen] = useState(false);
   const [isHowItWorksOpen, setIsHowItWorksOpen] = useState(false);
 
-  // Initial Load
+  // Initial Load with URL Hash preservation
   useEffect(() => {
     async function init() {
+      const initialRouteInfo = parseRouteFromHash();
       const docs = await documentService.getDocuments();
       setDocuments(docs);
-      if (docs.length > 0) {
+
+      if (initialRouteInfo.route === 'reader' && initialRouteInfo.docId) {
+        const doc = docs.find(d => d.id === initialRouteInfo.docId) || await documentService.getDocument(initialRouteInfo.docId);
+        if (doc) {
+          setActiveDocument(doc);
+          const safePage = initialRouteInfo.pageNumber && initialRouteInfo.pageNumber <= doc.pages.length
+            ? initialRouteInfo.pageNumber
+            : 1;
+          setActivePageNumber(safePage);
+          setCurrentRoute('reader');
+          if (doc.customPreferences && Object.keys(doc.customPreferences).length > 0) {
+            setPreferences(prev => ({ ...prev, ...doc.customPreferences }));
+          }
+        } else if (docs.length > 0) {
+          setActiveDocument(docs[0]);
+          setCurrentRoute('reader');
+        }
+      } else if (docs.length > 0) {
         setActiveDocument(docs[0]);
+        if (initialRouteInfo.route !== 'landing') {
+          setCurrentRoute(initialRouteInfo.route);
+        }
+      } else if (initialRouteInfo.route !== 'landing') {
+        setCurrentRoute(initialRouteInfo.route);
       }
 
       const prof = await profileService.getProfile();
@@ -161,6 +207,103 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     init();
   }, []);
+
+  // Firebase Auth persistence synchronization across refresh
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (typeof process !== 'undefined' && process.env?.NODE_ENV === 'test') return;
+
+    try {
+      const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+        if (firebaseUser && !firebaseUser.isAnonymous) {
+          const token = await firebaseUser.getIdToken();
+          localStorage.setItem('lexiease_auth_token', token);
+          const displayName = firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User';
+          const u: User = {
+            id: firebaseUser.uid,
+            name: displayName,
+            email: firebaseUser.email || '',
+            avatar: displayName.substring(0, 2).toUpperCase(),
+            role: 'student',
+            createdAt: firebaseUser.metadata.creationTime || new Date().toISOString()
+          };
+          setCurrentUser(u);
+          localStorage.setItem('lexiease_current_user', JSON.stringify(u));
+        } else if (firebaseUser && firebaseUser.isAnonymous) {
+          const token = await firebaseUser.getIdToken();
+          localStorage.setItem('lexiease_auth_token', token);
+          const isDevMock = localStorage.getItem('lexiease_dev_mock_user') === 'true';
+          if (!isDevMock) {
+            setCurrentUser(null);
+            localStorage.removeItem('lexiease_current_user');
+          }
+        } else if (!firebaseUser) {
+          const isDevMock = localStorage.getItem('lexiease_dev_mock_user') === 'true';
+          if (!isDevMock) {
+            setCurrentUser(null);
+            localStorage.removeItem('lexiease_current_user');
+          }
+        }
+      });
+      return () => unsubscribe();
+    } catch (e) {
+      console.warn('[auth] Firebase onAuthStateChanged listener skipped', e);
+    }
+  }, []);
+
+  // Sync state to URL hash
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const targetHash = buildRouteHash(currentRoute, activeDocument?.id, activePageNumber);
+    if (window.location.hash !== targetHash) {
+      const currentParsed = parseRouteFromHash();
+      // If only page number changed within reader, replaceState to avoid history bloat
+      if (currentParsed.route === currentRoute && currentParsed.docId === activeDocument?.id) {
+        try {
+          window.history.replaceState(null, '', targetHash);
+        } catch {
+          window.location.hash = targetHash;
+        }
+      } else {
+        try {
+          window.history.pushState(null, '', targetHash);
+        } catch {
+          window.location.hash = targetHash;
+        }
+      }
+    }
+  }, [currentRoute, activeDocument?.id, activePageNumber]);
+
+  // Listen to external navigation changes (browser back/forward buttons or hash change)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleNavigationChange = async () => {
+      const { route, docId, pageNumber } = parseRouteFromHash();
+
+      setCurrentRoute(prev => (prev !== route ? route : prev));
+
+      if (route === 'reader' && docId) {
+        if (activeDocument?.id !== docId) {
+          const doc = await documentService.getDocument(docId);
+          if (doc) {
+            setActiveDocument(doc);
+            setActivePageNumber(pageNumber || 1);
+          }
+        } else if (pageNumber && pageNumber !== activePageNumber) {
+          setActivePageNumber(pageNumber);
+        }
+      }
+    };
+
+    window.addEventListener('popstate', handleNavigationChange);
+    window.addEventListener('hashchange', handleNavigationChange);
+    return () => {
+      window.removeEventListener('popstate', handleNavigationChange);
+      window.removeEventListener('hashchange', handleNavigationChange);
+    };
+  }, [activeDocument?.id, activePageNumber]);
+
 
   // Update preferences reactively
   const updatePreferences = useCallback((updates: Partial<ReadingPreferences>, isDocumentOnly = false) => {
@@ -246,16 +389,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setDocuments(docs);
   }, []);
 
-  const selectDocument = useCallback(async (id: string) => {
+  const selectDocument = useCallback(async (id: string, pageNumber: number = 1) => {
     ttsService.stop();
     setTtsState(prev => ({ ...prev, isPlaying: false, isPaused: false, currentWordIndex: -1 }));
     const doc = await documentService.getDocument(id);
     if (doc) {
       setActiveDocument(doc);
-      setActivePageNumber(1);
+      const safePage = pageNumber > 0 && pageNumber <= doc.pages.length ? pageNumber : 1;
+      setActivePageNumber(safePage);
       setActiveTranslatedText(null);
       setCurrentLanguage(doc.language || 'en-IN');
-      
+
       // If doc has custom preferences override, apply it; otherwise fallback to global profile
       if (doc.customPreferences && Object.keys(doc.customPreferences).length > 0) {
         setPreferences(prev => ({ ...prev, ...doc.customPreferences }));
@@ -268,8 +412,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [profile]);
 
-  const navigateToReader = useCallback((documentId: string) => {
-    selectDocument(documentId);
+  const navigateToReader = useCallback((documentId: string, pageNumber: number = 1) => {
+    selectDocument(documentId, pageNumber);
     setCurrentRoute('reader');
   }, [selectDocument]);
 
@@ -286,10 +430,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [activeDocument, documents, refreshDocuments, selectDocument]);
 
-  const uploadAndDigitise = useCallback(async (file: File): Promise<Document> => {
-    const newDoc = await documentService.digitise(file);
+  const uploadAndDigitise = useCallback(async (file: File, onProgress?: (step: 'idle' | 'uploading' | 'processing' | 'extracting' | 'formatting' | 'success' | 'error') => void): Promise<Document> => {
+    const newDoc = await documentService.digitise(file, onProgress);
+    onProgress?.('formatting');
     await refreshDocuments();
     await selectDocument(newDoc.id);
+    onProgress?.('success');
     return newDoc;
   }, [refreshDocuments, selectDocument]);
 
@@ -301,9 +447,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [activeDocument]);
 
-  // Auth mock
+  // Auth session handling
   const loginUser = useCallback(async (user: User) => {
     setCurrentUser(user);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('lexiease_current_user', JSON.stringify(user));
+    }
     const prof = await profileService.getProfile();
     setProfile(prof);
     if (prof && prof.preferences) {
@@ -312,7 +461,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentRoute('library');
   }, []);
 
-  const logoutUser = useCallback(() => {
+  const logoutUser = useCallback(async () => {
+    try {
+      await auth.signOut();
+    } catch (e) {
+      console.warn('[auth] Error signing out of Firebase', e);
+    }
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('lexiease_current_user');
+      localStorage.removeItem('lexiease_auth_token');
+    }
     setCurrentUser(null);
     setCurrentRoute('landing');
   }, []);
@@ -419,8 +577,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setIsTranslating(true);
     setCurrentLanguage(targetLang);
     try {
-      const page = activeDocument.pages.find(p => p.pageNumber === activePageNumber) || activeDocument.pages[0];
-      if (!page) return;
+      const pageIndex = activeDocument.pages.findIndex(p => p.pageNumber === activePageNumber);
+      if (pageIndex === -1) return;
+      const page = activeDocument.pages[pageIndex];
 
       if (targetLang === activeDocument.language) {
         setActiveTranslatedText(null);
@@ -428,8 +587,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Cached instant translation
         setActiveTranslatedText(page.translations[targetLang]);
       } else {
-        const res = await translationService.translate(page.content, activeDocument.language, targetLang);
-        setActiveTranslatedText(res.translatedText);
+        const updatedPage = await aiService.translatePage(activeDocument.id, pageIndex, targetLang);
+        if (updatedPage && updatedPage.translations && updatedPage.translations[targetLang]) {
+          setActiveTranslatedText(updatedPage.translations[targetLang]);
+          // Manually update activeDocument state
+          setActiveDocument(prev => {
+            if (!prev) return null;
+            const newPages = [...prev.pages];
+            newPages[pageIndex] = updatedPage;
+            return { ...prev, pages: newPages };
+          });
+        } else {
+            console.warn('Translation returned empty for the target language.');
+        }
       }
     } catch (e) {
       console.warn('Translation failed:', e);
@@ -451,6 +621,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     logoutUser,
     documents,
     activeDocument,
+    setActiveDocument,
     activePageNumber,
     setActivePageNumber,
     viewMode,

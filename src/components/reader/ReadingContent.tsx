@@ -1,8 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useState, useRef, useMemo, useContext } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { DocumentPage, ReadingPreferences, ConfusablePair, TTSState } from '../../types';
 import { getFontFamilyCSS } from '../../lib/utils';
-import { useApp } from '../../context/AppContext';
-import { HelpCircle, Volume2, Info } from 'lucide-react';
+import { Info } from 'lucide-react';
 
 export interface ReadingContentProps {
   page: DocumentPage;
@@ -11,6 +12,181 @@ export interface ReadingContentProps {
   translatedText: string | null;
   onWordClick?: (wordIndex: number, word: string) => void;
 }
+
+const ReaderRenderContext = React.createContext<{
+  preferences: ReadingPreferences;
+  ttsState: TTSState;
+  onWordClick?: (idx: number, word: string) => void;
+  wordIndexRef: React.MutableRefObject<number>;
+} | null>(null);
+
+const renderConfusableCharacters = (word: string, preferences: ReadingPreferences) => {
+  if (!preferences.confusableLetterSettings.enabled) {
+    return <>{word}</>;
+  }
+
+  const { activePairs, style } = preferences.confusableLetterSettings;
+  const chars = Array.from(word);
+
+  return chars.map((char, cIdx) => {
+    const lower = char.toLowerCase();
+    let isConfusable = false;
+
+    if (activePairs.includes('b/d') && (lower === 'b' || lower === 'd')) {
+      isConfusable = true;
+    } else if (activePairs.includes('p/q') && (lower === 'p' || lower === 'q')) {
+      isConfusable = true;
+    } else if (activePairs.includes('m/w') && (lower === 'm' || lower === 'w')) {
+      isConfusable = true;
+    } else if (activePairs.includes('n/u') && (lower === 'n' || lower === 'u')) {
+      isConfusable = true;
+    } else if (activePairs.includes('s/z') && (lower === 's' || lower === 'z')) {
+      isConfusable = true;
+    }
+
+    if (!isConfusable) return <React.Fragment key={cIdx}>{char}</React.Fragment>;
+
+    if (style === 'weight') {
+      return (
+        <span
+          key={cIdx}
+          className={`font-black ${lower === 'b' || lower === 'p' || lower === 'm' || lower === 'n' || lower === 's' ? 'text-[#B45309]' : 'text-[#047857]'}`}
+          title={`Confusable letter: ${char}`}
+        >
+          {char}
+        </span>
+      );
+    } else if (style === 'subtle-color') {
+      return (
+        <span
+          key={cIdx}
+          className={`px-0.5 rounded ${lower === 'b' || lower === 'p' || lower === 'm' || lower === 'n' || lower === 's' ? 'bg-[#FED7AA]/50 text-[#9A3412]' : 'bg-[#BBF7D0]/50 text-[#166534]'}`}
+        >
+          {char}
+        </span>
+      );
+    } else if (style === 'underline') {
+      return (
+        <span
+          key={cIdx}
+          className="underline decoration-2 decoration-[#D97706] font-bold"
+        >
+          {char}
+        </span>
+      );
+    } else {
+      return (
+        <span key={cIdx} className="relative inline-block font-semibold">
+          {char}
+          <span className="absolute bottom-0 left-1/2 -translate-x-1/2 w-1 h-1 bg-[#D97706] rounded-full" />
+        </span>
+      );
+    }
+  });
+};
+
+const formatWordContent = (word: string, preferences: ReadingPreferences) => {
+  if (preferences.bionicReading && word.length > 2) {
+    const mid = Math.ceil(word.length / 2);
+    const head = word.slice(0, mid);
+    const tail = word.slice(mid);
+    return (
+      <>
+        <span className="font-extrabold">{renderConfusableCharacters(head, preferences)}</span>
+        <span>{renderConfusableCharacters(tail, preferences)}</span>
+      </>
+    );
+  }
+  return renderConfusableCharacters(word, preferences);
+};
+
+const TokenizedTextNode: React.FC<{ text: string }> = ({ text }) => {
+  const ctx = useContext(ReaderRenderContext);
+  if (!ctx) return <>{text}</>;
+  const { preferences, ttsState, onWordClick, wordIndexRef } = ctx;
+
+  const words = text.split(/(\s+)/);
+  const elements: React.ReactNode[] = [];
+
+  words.forEach((chunk, eIdx) => {
+    if (/^\s+$/.test(chunk)) {
+      elements.push(<span key={eIdx}>{chunk}</span>);
+    } else if (chunk.length > 0) {
+      const wordIdx = wordIndexRef.current++;
+      const isCurrentSpokenWord = ttsState.isPlaying && ttsState.currentWordIndex === wordIdx;
+      const isCurrentSpokenPhrase = ttsState.isPlaying &&
+        preferences.highlightMode === 'phrase' &&
+        wordIdx >= ttsState.currentWordIndex - 2 &&
+        wordIdx <= ttsState.currentWordIndex + 2;
+
+      let highlightClass = '';
+      if (isCurrentSpokenWord && preferences.highlightMode === 'word') {
+        highlightClass = 'rounded-md shadow-xs px-1 -mx-0.5 font-bold transition-all scale-105 inline-block';
+      } else if (isCurrentSpokenPhrase) {
+        highlightClass = 'rounded-xs px-0.5 bg-[#FDE047]/60';
+      }
+
+      elements.push(
+        <span
+          key={eIdx}
+          id={`word-span-${wordIdx}`}
+          onClick={() => onWordClick && onWordClick(wordIdx, chunk)}
+          className={`cursor-pointer transition-colors duration-100 ${highlightClass}`}
+          style={{
+            backgroundColor: isCurrentSpokenWord && preferences.highlightMode === 'word'
+              ? preferences.highlightColor
+              : undefined,
+            color: isCurrentSpokenWord && preferences.highlightMode === 'word'
+              ? '#111827'
+              : undefined
+          }}
+          title="Click to start speech from this word"
+        >
+          {formatWordContent(chunk, preferences)}
+        </span>
+      );
+    }
+  });
+  return <React.Fragment>{elements}</React.Fragment>;
+};
+
+const RecursiveTokenizer: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  return (
+    <>
+      {React.Children.map(children, (child) => {
+        if (typeof child === 'string') {
+          return <TokenizedTextNode text={child} />;
+        }
+        if (React.isValidElement(child) && (child.props as any).children) {
+          return React.cloneElement(child as React.ReactElement<any>, {
+            children: <RecursiveTokenizer>{(child.props as any).children}</RecursiveTokenizer>
+          });
+        }
+        return child;
+      })}
+    </>
+  );
+};
+
+const mComponents = {
+  p({node, children, ...props}: any) {
+    const ctx = useContext(ReaderRenderContext);
+    const mb = ctx?.preferences.paragraphSpacing || 1.5;
+    return <p style={{ marginBottom: `${mb}rem` }} {...props}><RecursiveTokenizer>{children}</RecursiveTokenizer></p>
+  },
+  h1({node, children, ...props}: any) { return <h1 className="text-4xl font-bold mt-8 mb-4" {...props}><RecursiveTokenizer>{children}</RecursiveTokenizer></h1> },
+  h2({node, children, ...props}: any) { return <h2 className="text-3xl font-bold mt-6 mb-3" {...props}><RecursiveTokenizer>{children}</RecursiveTokenizer></h2> },
+  h3({node, children, ...props}: any) { return <h3 className="text-2xl font-bold mt-5 mb-2" {...props}><RecursiveTokenizer>{children}</RecursiveTokenizer></h3> },
+  h4({node, children, ...props}: any) { return <h4 className="text-xl font-bold mt-4 mb-2" {...props}><RecursiveTokenizer>{children}</RecursiveTokenizer></h4> },
+  h5({node, children, ...props}: any) { return <h5 className="text-lg font-bold mt-3 mb-1" {...props}><RecursiveTokenizer>{children}</RecursiveTokenizer></h5> },
+  h6({node, children, ...props}: any) { return <h6 className="text-base font-bold mt-2 mb-1" {...props}><RecursiveTokenizer>{children}</RecursiveTokenizer></h6> },
+  li({node, children, ...props}: any) { return <li className="ml-4 list-disc" {...props}><RecursiveTokenizer>{children}</RecursiveTokenizer></li> },
+  table({node, children, ...props}: any) { return <div className="overflow-x-auto"><table className="min-w-full border-collapse border border-[#D8CEB9] my-4" {...props}>{children}</table></div> },
+  th({node, children, ...props}: any) { return <th className="border border-[#D8CEB9] px-4 py-2 bg-[#FAF3E0] font-bold text-left" {...props}><RecursiveTokenizer>{children}</RecursiveTokenizer></th> },
+  td({node, children, ...props}: any) { return <td className="border border-[#D8CEB9] px-4 py-2" {...props}><RecursiveTokenizer>{children}</RecursiveTokenizer></td> },
+  strong({node, children, ...props}: any) { return <strong className="font-bold" {...props}><RecursiveTokenizer>{children}</RecursiveTokenizer></strong> },
+  em({node, children, ...props}: any) { return <em className="italic" {...props}><RecursiveTokenizer>{children}</RecursiveTokenizer></em> },
+};
 
 export const ReadingContent: React.FC<ReadingContentProps> = ({
   page,
@@ -21,118 +197,17 @@ export const ReadingContent: React.FC<ReadingContentProps> = ({
 }) => {
   const [selectedTerm, setSelectedTerm] = useState<{ term: string; definition: string } | null>(null);
 
-  // Content to render (either translated or original text paragraphs)
   const rawText = translatedText || page.content;
-  const paragraphs = useMemo(() => {
-    return rawText.split(/\n\s*\n/).filter(p => p.trim().length > 0);
-  }, [rawText]);
+  const wordIndexRef = useRef(0);
+  wordIndexRef.current = 0; // Reset on every render
 
-  // Tokenize words with global indices for synchronized speech tracking
-  const tokenizedParagraphs = useMemo(() => {
-    let globalWordIndex = 0;
-
-    return paragraphs.map((paraText, pIdx) => {
-      const words = paraText.split(/(\s+)/);
-      const elements: Array<{ isSpace: boolean; text: string; wordIndex?: number }> = [];
-
-      words.forEach(chunk => {
-        if (/^\s+$/.test(chunk)) {
-          elements.push({ isSpace: true, text: chunk });
-        } else if (chunk.length > 0) {
-          elements.push({ isSpace: false, text: chunk, wordIndex: globalWordIndex });
-          globalWordIndex++;
-        }
-      });
-
-      return { pIdx, elements };
-    });
-  }, [paragraphs]);
-
-  // Confusable letters renderer helper
-  const renderConfusableCharacters = (word: string) => {
-    if (!preferences.confusableLetterSettings.enabled) {
-      return word;
-    }
-
-    const { activePairs, style } = preferences.confusableLetterSettings;
-    const chars = Array.from(word);
-
-    return chars.map((char, cIdx) => {
-      const lower = char.toLowerCase();
-      let isConfusable = false;
-      let pairType: ConfusablePair | '' = '';
-
-      if (activePairs.includes('b/d') && (lower === 'b' || lower === 'd')) {
-        isConfusable = true;
-        pairType = 'b/d';
-      } else if (activePairs.includes('p/q') && (lower === 'p' || lower === 'q')) {
-        isConfusable = true;
-        pairType = 'p/q';
-      } else if (activePairs.includes('m/w') && (lower === 'm' || lower === 'w')) {
-        isConfusable = true;
-        pairType = 'm/w';
-      } else if (activePairs.includes('n/u') && (lower === 'n' || lower === 'u')) {
-        isConfusable = true;
-        pairType = 'n/u';
-      }
-
-      if (!isConfusable) return char;
-
-      if (style === 'weight') {
-        return (
-          <span 
-            key={cIdx} 
-            className={`font-black ${lower === 'b' || lower === 'p' || lower === 'm' ? 'text-[#B45309]' : 'text-[#047857]'}`}
-            title={`Confusable letter: ${char}`}
-          >
-            {char}
-          </span>
-        );
-      } else if (style === 'subtle-color') {
-        return (
-          <span 
-            key={cIdx} 
-            className={`px-0.5 rounded ${lower === 'b' || lower === 'p' || lower === 'm' ? 'bg-[#FED7AA]/50 text-[#9A3412]' : 'bg-[#BBF7D0]/50 text-[#166534]'}`}
-          >
-            {char}
-          </span>
-        );
-      } else if (style === 'underline') {
-        return (
-          <span 
-            key={cIdx} 
-            className="underline decoration-2 decoration-[#D97706] font-bold"
-          >
-            {char}
-          </span>
-        );
-      } else {
-        // Under-dot style
-        return (
-          <span key={cIdx} className="relative inline-block font-semibold">
-            {char}
-            <span className="absolute bottom-0 left-1/2 -translate-x-1/2 w-1 h-1 bg-[#D97706] rounded-full" />
-          </span>
-        );
-      }
-    });
-  };
-
-  // Bionic fixation helper
-  const formatWordContent = (word: string) => {
-    if (preferences.bionicReading && word.length > 2) {
-      const mid = Math.ceil(word.length / 2);
-      const head = word.slice(0, mid);
-      const tail = word.slice(mid);
-      return (
-        <>
-          <span className="font-extrabold">{renderConfusableCharacters(head)}</span>
-          <span>{renderConfusableCharacters(tail)}</span>
-        </>
-      );
-    }
-    return renderConfusableCharacters(word);
-  };
+  // Context provider wrapper handles everything else
+  const contextValue = useMemo(() => ({
+    preferences,
+    ttsState,
+    onWordClick,
+    wordIndexRef
+  }), [preferences, ttsState, onWordClick]);
 
   const fontFamily = getFontFamilyCSS(preferences.font);
 
@@ -152,61 +227,20 @@ export const ReadingContent: React.FC<ReadingContentProps> = ({
         textAlign: preferences.alignment
       }}
     >
-      <div 
-        className="mx-auto space-y-6 transition-all"
+      <div
+        className="mx-auto transition-all"
         style={{
           maxWidth: `${preferences.textWidth}ch`
         }}
       >
-        {tokenizedParagraphs.map(({ pIdx, elements }) => (
-          <p
-            key={pIdx}
-            className="transition-all rounded-lg p-1.5 -m-1.5"
-            style={{
-              marginBottom: `${preferences.paragraphSpacing}rem`
-            }}
+        <ReaderRenderContext.Provider value={contextValue}>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={mComponents}
           >
-            {elements.map((elem, eIdx) => {
-              if (elem.isSpace) {
-                return <span key={eIdx}>{elem.text}</span>;
-              }
-
-              const wordIdx = elem.wordIndex ?? -1;
-              const isCurrentSpokenWord = ttsState.isPlaying && ttsState.currentWordIndex === wordIdx;
-              const isCurrentSpokenPhrase = ttsState.isPlaying && 
-                preferences.highlightMode === 'phrase' && 
-                wordIdx >= ttsState.currentWordIndex - 2 && 
-                wordIdx <= ttsState.currentWordIndex + 2;
-
-              let highlightClass = '';
-              if (isCurrentSpokenWord && preferences.highlightMode === 'word') {
-                highlightClass = 'rounded-md shadow-xs px-1 -mx-0.5 font-bold transition-all scale-105 inline-block';
-              } else if (isCurrentSpokenPhrase) {
-                highlightClass = 'rounded-xs px-0.5 bg-[#FDE047]/60';
-              }
-
-              return (
-                <span
-                  key={eIdx}
-                  id={`word-span-${wordIdx}`}
-                  onClick={() => onWordClick && onWordClick(wordIdx, elem.text)}
-                  className={`cursor-pointer transition-colors duration-100 ${highlightClass}`}
-                  style={{
-                    backgroundColor: isCurrentSpokenWord && preferences.highlightMode === 'word' 
-                      ? preferences.highlightColor 
-                      : undefined,
-                    color: isCurrentSpokenWord && preferences.highlightMode === 'word'
-                      ? '#111827'
-                      : undefined
-                  }}
-                  title="Click to start speech from this word"
-                >
-                  {formatWordContent(elem.text)}
-                </span>
-              );
-            })}
-          </p>
-        ))}
+            {rawText}
+          </ReactMarkdown>
+        </ReaderRenderContext.Provider>
 
         {/* Key Educational Terms Glossary in Reader */}
         {page.keyTerms && page.keyTerms.length > 0 && !translatedText && (
@@ -238,7 +272,7 @@ export const ReadingContent: React.FC<ReadingContentProps> = ({
 
       {/* Term definition floating mini-card */}
       {selectedTerm && (
-        <div 
+        <div
           className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 p-4 bg-[#FEF9EB] border border-[#D97706] rounded-2xl shadow-xl max-w-sm w-[90%] text-[#26231E] animate-in fade-in slide-in-from-bottom-3"
         >
           <div className="flex items-center justify-between gap-2 border-b border-[#E7DFCA] pb-2 mb-2">

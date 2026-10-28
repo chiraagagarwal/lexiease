@@ -19,10 +19,45 @@ export default defineConfig(() => {
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
       proxy: {
         '/api': {
-          target: 'http://127.0.0.1:8000',
+          target: 'http://127.0.0.1:8002',
           changeOrigin: true
         }
       }
     },
+    build: {
+      chunkSizeWarningLimit: 600,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('node_modules')) {
+              if (id.includes('firebase')) {
+                return 'vendor-firebase';
+              }
+              if (
+                id.includes('react-markdown') ||
+                id.includes('remark-gfm') ||
+                id.includes('micromark') ||
+                id.includes('unified') ||
+                id.includes('mdast') ||
+                id.includes('unist') ||
+                id.includes('vfile') ||
+                id.includes('bail') ||
+                id.includes('trough') ||
+                id.includes('decode-named-character-reference') ||
+                id.includes('character-entities')
+              ) {
+                return 'vendor-markdown';
+              }
+              if (id.includes('motion')) {
+                return 'vendor-motion';
+              }
+              if (id.includes('lucide-react')) {
+                return 'vendor-lucide';
+              }
+            }
+          }
+        }
+      }
+    }
   };
 });

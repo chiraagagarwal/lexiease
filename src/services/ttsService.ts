@@ -1,3 +1,5 @@
+import { aiService } from './aiService';
+
 export interface TTSOptions {
   rate?: number;
   pitch?: number;
@@ -18,6 +20,8 @@ class TTSService {
   private currentTokens: string[] = [];
   private currentTokenIndex = 0;
   private currentRate = 1.0;
+  private activeAudioUrls: string[] = [];
+  private currentAudioElement: HTMLAudioElement | null = null;
 
   constructor() {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -40,90 +44,158 @@ class TTSService {
       // Some browsers require restart on rate change
       this.currentUtterance.rate = this.currentRate;
     }
+    if (this.currentAudioElement) {
+      this.currentAudioElement.playbackRate = this.currentRate;
+    }
   }
 
-  public speak(
-    text: string, 
-    options: TTSOptions = {}
-  ): void {
-    if (!this.synth) {
-      console.warn('SpeechSynthesis is not supported on this browser/environment.');
-      options.onError?.('TTS not supported');
-      return;
+  private revokeActiveAudioUrls(): void {
+    if (this.activeAudioUrls.length > 0) {
+      this.activeAudioUrls.forEach(url => {
+        try {
+          if (typeof window !== 'undefined' && window.URL && typeof window.URL.revokeObjectURL === 'function') {
+            window.URL.revokeObjectURL(url);
+          }
+        } catch {
+          // Ignore revocation errors
+        }
+      });
+      this.activeAudioUrls = [];
     }
+  }
 
+  public async speak(
+    text: string,
+    options: TTSOptions = {}
+  ): Promise<void> {
     this.stop();
 
-    // Prepare tokens for DOM synchronized mapping
     this.currentTokens = text.match(/\S+/g) || [];
     this.currentTokenIndex = 0;
     this.currentRate = options.rate || this.currentRate || 1.0;
+    this.isSpeakingInternal = true;
+    this.isPausedInternal = false;
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    this.currentUtterance = utterance;
-    utterance.rate = this.currentRate;
-    utterance.pitch = options.pitch || 1.0;
-    utterance.lang = options.lang || 'en-IN';
+    try {
+        const langCode = options.lang || 'en-IN';
+        const audioUrls = await aiService.generateTTS(text, langCode);
 
-    // Select voice if requested
-    if (options.voiceName) {
-      const voices = this.getVoices();
-      const matched = voices.find(v => v.name === options.voiceName || v.lang.startsWith(options.lang || 'en'));
-      if (matched) utterance.voice = matched;
+        if (!audioUrls || audioUrls.length === 0) {
+           throw new Error("Failed to get audio URL");
+        }
+
+        this.activeAudioUrls = [...audioUrls];
+        let currentAudioIndex = 0;
+
+        const playNextAudio = async () => {
+            if (currentAudioIndex >= audioUrls.length) {
+                this.cleanup();
+                options.onEnd?.();
+                return;
+            }
+
+            const currentAudio = new Audio(audioUrls[currentAudioIndex]);
+            currentAudio.playbackRate = this.currentRate;
+            this.currentAudioElement = currentAudio;
+            (this as any).audioElement = currentAudio;
+
+            currentAudio.onplay = () => {
+                const estimatedMsPerWord = (60000 / (160 * this.currentRate));
+                this.startFallbackTimer(estimatedMsPerWord, options.onWordBoundary);
+            };
+
+            currentAudio.onended = () => {
+                currentAudioIndex++;
+                playNextAudio();
+            };
+
+            currentAudio.onerror = (e) => {
+                console.warn('Audio playback error:', e);
+                this.cleanup();
+                options.onError?.(e);
+            };
+
+            await currentAudio.play();
+        };
+
+        await playNextAudio();
+
+    } catch(e) {
+        console.warn('TTS API error, falling back to window.speechSynthesis', e);
+        this.revokeActiveAudioUrls();
+        if (!this.synth) {
+            options.onError?.(e);
+            return;
+        }
+
+        const UtteranceConstructor = typeof window !== 'undefined' && 'SpeechSynthesisUtterance' in window
+          ? window.SpeechSynthesisUtterance
+          : (typeof SpeechSynthesisUtterance !== 'undefined' ? SpeechSynthesisUtterance : null);
+
+        if (!UtteranceConstructor) {
+          options.onError?.('SpeechSynthesisUtterance not supported');
+          return;
+        }
+
+        // Fallback to old behavior
+        const utterance = new UtteranceConstructor(text);
+        this.currentUtterance = utterance;
+        utterance.rate = this.currentRate;
+        utterance.pitch = options.pitch || 1.0;
+        utterance.lang = options.lang || 'en-IN';
+
+        if (options.voiceName) {
+          const voices = this.getVoices();
+          const matched = voices.find(v => v.name === options.voiceName || v.lang.startsWith(options.lang || 'en'));
+          if (matched) utterance.voice = matched;
+        }
+
+        let hasReceivedBoundary = false;
+
+        utterance.onstart = () => {
+          this.isSpeakingInternal = true;
+          this.isPausedInternal = false;
+          const estimatedMsPerWord = (60000 / (160 * this.currentRate));
+          this.startFallbackTimer(estimatedMsPerWord, options.onWordBoundary, () => hasReceivedBoundary);
+        };
+
+        utterance.onboundary = (event: SpeechSynthesisEvent) => {
+          hasReceivedBoundary = true;
+          this.clearFallbackTimer();
+
+          if (event.name === 'word') {
+            const charIndex = event.charIndex;
+            const textUpToChar = text.substring(0, charIndex);
+            const wordIndex = (textUpToChar.match(/\S+/g) || []).length;
+            const currentWord = this.currentTokens[wordIndex] || '';
+
+            this.currentTokenIndex = wordIndex;
+            options.onWordBoundary?.(wordIndex, charIndex, currentWord);
+          }
+        };
+
+        utterance.onend = () => {
+          this.cleanup();
+          options.onEnd?.();
+        };
+
+        utterance.onerror = (e) => {
+          console.warn('TTS utterance error:', e);
+          this.cleanup();
+          options.onError?.(e);
+        };
+
+        this.synth.speak(utterance);
     }
-
-    let hasReceivedBoundary = false;
-
-    utterance.onstart = () => {
-      this.isSpeakingInternal = true;
-      this.isPausedInternal = false;
-
-      // Start fallback pacing timer in case boundary events are not fired by the browser engine
-      const estimatedMsPerWord = (60000 / (160 * this.currentRate));
-      this.startFallbackTimer(estimatedMsPerWord, options.onWordBoundary, () => {
-        return hasReceivedBoundary;
-      });
-    };
-
-    utterance.onboundary = (event: SpeechSynthesisEvent) => {
-      hasReceivedBoundary = true;
-      this.clearFallbackTimer();
-
-      if (event.name === 'word') {
-        const charIndex = event.charIndex;
-        // Compute word index from charIndex
-        const textUpToChar = text.substring(0, charIndex);
-        const wordIndex = (textUpToChar.match(/\S+/g) || []).length;
-        const currentWord = this.currentTokens[wordIndex] || '';
-
-        this.currentTokenIndex = wordIndex;
-        options.onWordBoundary?.(wordIndex, charIndex, currentWord);
-      } else if (event.name === 'sentence') {
-        // Sentence boundary
-      }
-    };
-
-    utterance.onend = () => {
-      this.cleanup();
-      options.onEnd?.();
-    };
-
-    utterance.onerror = (e) => {
-      console.warn('TTS utterance error:', e);
-      this.cleanup();
-      options.onError?.(e);
-    };
-
-    this.synth.speak(utterance);
   }
 
   private startFallbackTimer(
-    msPerWord: number, 
+    msPerWord: number,
     onWordBoundary?: (index: number, charIndex: number, word: string) => void,
     hasRealBoundary?: () => boolean
   ) {
     this.clearFallbackTimer();
-    
+
     // Slight grace period before fallback engages
     const interval = window.setInterval(() => {
       if (hasRealBoundary && hasRealBoundary()) {
@@ -153,6 +225,11 @@ class TTSService {
   }
 
   public pause(): void {
+    if ((this as any).audioElement && this.isSpeakingInternal && !this.isPausedInternal) {
+      (this as any).audioElement.pause();
+      this.isPausedInternal = true;
+      return;
+    }
     if (this.synth && this.isSpeakingInternal && !this.isPausedInternal) {
       this.synth.pause();
       this.isPausedInternal = true;
@@ -160,6 +237,11 @@ class TTSService {
   }
 
   public resume(): void {
+    if ((this as any).audioElement && this.isPausedInternal) {
+      (this as any).audioElement.play();
+      this.isPausedInternal = false;
+      return;
+    }
     if (this.synth && this.isPausedInternal) {
       this.synth.resume();
       this.isPausedInternal = false;
@@ -168,6 +250,12 @@ class TTSService {
 
   public stop(): void {
     this.clearFallbackTimer();
+    if (this.currentAudioElement) {
+      this.currentAudioElement.pause();
+      this.currentAudioElement.currentTime = 0;
+      this.currentAudioElement = null;
+    }
+    (this as any).audioElement = null;
     if (this.synth) {
       this.synth.cancel();
     }
@@ -176,6 +264,12 @@ class TTSService {
 
   private cleanup(): void {
     this.clearFallbackTimer();
+    this.revokeActiveAudioUrls();
+    if (this.currentAudioElement) {
+      this.currentAudioElement.pause();
+      this.currentAudioElement = null;
+    }
+    (this as any).audioElement = null;
     this.isSpeakingInternal = false;
     this.isPausedInternal = false;
     this.currentUtterance = null;

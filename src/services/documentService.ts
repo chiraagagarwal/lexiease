@@ -1,6 +1,8 @@
 import { openDB, IDBPDatabase } from 'idb';
 import { Document } from '../types';
 import { MOCK_DOCUMENTS } from '../data/mockDocuments';
+import { getAuthHeaders } from './auth';
+import { resolveApiUrl } from './apiUtils';
 
 const DB_NAME = 'AksharSetuDB';
 const STORE_NAME = 'documents';
@@ -48,11 +50,11 @@ class DocumentService {
         } else {
           // If no legacy data and not in production, populate mock data for testing
           // Since we might not be in a vite context during tests, check carefully
-          const isDev = typeof process !== 'undefined' 
-            ? process.env.NODE_ENV !== 'production' 
+          const isDev = typeof process !== 'undefined'
+            ? process.env.NODE_ENV !== 'production'
             // @ts-ignore
             : (typeof import.meta !== 'undefined' && import.meta.env && !import.meta.env.PROD);
-            
+
           if (isDev) {
             docsToInsert = [...MOCK_DOCUMENTS];
           }
@@ -103,12 +105,12 @@ class DocumentService {
     try {
       const existing = await this.getDocument(doc.id);
       const toSave = { ...doc, updatedAt: new Date().toISOString() };
-      
+
       // If we're not providing a new originalFile, try to keep the old one if it existed
       if (!toSave.originalFile && existing && existing.originalFile) {
         toSave.originalFile = existing.originalFile;
       }
-      
+
       await db.put(STORE_NAME, toSave);
       return toSave;
     } catch (e: any) {
@@ -140,15 +142,80 @@ class DocumentService {
     }
   }
 
-  public async digitise(file: File | { name: string; size: number; textContent?: string }): Promise<Document> {
+  public async digitise(file: File | { name: string; size: number; textContent?: string }, onProgress?: (step: 'idle' | 'uploading' | 'processing' | 'extracting' | 'formatting' | 'success' | 'error') => void): Promise<Document> {
     const docId = `doc_${Date.now()}`;
     const cleanTitle = file.name.replace(/\.[^/.]+$/, "");
-    
-    // Simulating mock OCR parsing for now since actual backend processing is out of scope 
-    // for this purely frontend storage migration
-    const sampleBody = ('textContent' in file && typeof file.textContent === 'string') 
-      ? file.textContent 
-      : `In natural biology, pollination is the vital ecological process by which pollen grains are transferred from the male anther of a flower to the female stigma.\n\nInsects like honeybees, bumblebees, and butterflies are among the most effective animal pollinators on Earth. As they forage for sweet floral nectar, tiny pollen particles adhere to their fuzzy bodies and are gently deposited onto neighboring blooms.\n\nWithout healthy pollinator populations, more than one-third of our global food supply—including crunchy apples, sweet berries, almonds, and colorful garden vegetables—would fail to produce fruit. Protecting natural biodiversity and avoiding chemical insecticides ensures our agricultural systems stay resilient.`;
+
+    let sampleBody = "";
+
+    if (file instanceof File) {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      onProgress?.('uploading');
+      const response = await fetch(resolveApiUrl("/api/document/parse"), {
+        method: "POST",
+        headers: await getAuthHeaders(),
+        body: formData,
+      });
+
+      if (!response.ok) {
+        let errDetails = response.statusText;
+        try {
+          const errData = await response.json();
+          errDetails = errData.detail || JSON.stringify(errData);
+        } catch {
+          errDetails = await response.text();
+        }
+        throw new Error(`Failed to start OCR parsing: ${errDetails}`);
+      }
+
+      const { task_id } = await response.json();
+
+      const maxAttempts = 60;
+      let attempts = 0;
+      let consecutive404s = 0;
+
+      while (attempts < maxAttempts) {
+        attempts++;
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const statusResponse = await fetch(resolveApiUrl(`/api/document/tasks/${task_id}`), {
+          headers: await getAuthHeaders()
+        });
+        if (!statusResponse.ok) {
+           if (statusResponse.status === 404) {
+             consecutive404s++;
+             if (consecutive404s <= 5) continue;
+           }
+           let errDetails = statusResponse.statusText;
+           try { errDetails = await statusResponse.text(); } catch {}
+           throw new Error(`Failed to check task status: ${errDetails}`);
+        }
+        consecutive404s = 0;
+
+        const statusData = await statusResponse.json();
+        if (statusData.status === "complete") {
+          onProgress?.('extracting');
+          sampleBody = statusData.result;
+          break;
+        } else if (statusData.status === "failed" || statusData.status === "rejected") {
+          const failMsg = statusData.error || statusData.detail || "Server OCR task failed";
+          throw new Error(`OCR processing failed: ${failMsg}`);
+        } else if (statusData.status === "not_found") {
+          throw new Error("OCR task not found");
+        }
+      }
+
+      if (attempts >= maxAttempts && !sampleBody) {
+        throw new Error("OCR document parsing timed out after 2 minutes. Please try again with a smaller or clearer file.");
+      }
+    } else if ('textContent' in file && typeof file.textContent === 'string') {
+      sampleBody = file.textContent;
+    }
+
+    if (!sampleBody) {
+       sampleBody = "No text could be extracted.";
+    }
 
     const paragraphs = sampleBody.split(/\n\s*\n/).filter(p => p.trim().length > 0);
     const wordCount = sampleBody.trim().split(/\s+/).length;
@@ -174,15 +241,6 @@ class DocumentService {
           pageNumber: 1,
           content: sampleBody,
           paragraphs: paragraphs,
-          simplifiedContent: `Pollination is how flowers make seeds and fruits.\n\nBees and butterflies fly to flowers to drink sweet nectar. When they land, yellow pollen dust sticks to their bodies and moves to other flowers.\n\nWe need bees to help grow yummy foods like apples, strawberries, and nuts. Taking care of gardens helps our bees stay safe.`,
-          keyTerms: [
-            { term: 'Pollination', definition: 'The transfer of pollen from an anther to a stigma enabling plant reproduction.' },
-            { term: 'Stigma', definition: 'The receptive surface of the female organ of a flower.' },
-            { term: 'Biodiversity', definition: 'The essential variety of living animals and plants in nature.' }
-          ],
-          translations: {
-            'hi-IN': `परागण वह महत्वपूर्ण प्रक्रिया है जिसके द्वारा परागकणों को फूल के नर भाग से मादा भाग में स्थानांतरित किया जाता है। मधुमक्खियां और तितलियां सबसे महत्वपूर्ण परागणकर्ता हैं।`
-          }
         }
       ],
       status: 'completed',

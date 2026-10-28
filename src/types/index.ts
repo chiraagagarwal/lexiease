@@ -69,11 +69,20 @@ export interface ReadingProfile {
   updatedAt: string;
 }
 
+export interface SimplifiedResult {
+  originalText: string;
+  simplifiedText: string;
+  readingGradeReduction: string;
+  keyVocabulary: Array<{ term: string; explanation: string; icon?: string }>;
+  bulletSummary: string[];
+}
+
 export interface DocumentPage {
   pageNumber: number;
   content: string;
   paragraphs: string[];
   simplifiedContent?: string;
+  simplificationResult?: SimplifiedResult;
   translations?: Record<string, string>;
   imageBanner?: string;
   diagramTitle?: string;

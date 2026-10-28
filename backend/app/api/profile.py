@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from typing import Dict, Any, Optional
 from app.db.database import get_session
-from app.core.security import verify_token
+from app.core.security import verify_user
 from app.models import User, ReadingProfile
 from pydantic import BaseModel
 from datetime import datetime, timezone
@@ -14,7 +14,7 @@ class ProfileUpdateRequest(BaseModel):
     calibration_answers: Optional[Dict[str, str]] = None
 
 @router.get("/")
-def get_profile(token_data: dict = Depends(verify_token), session: Session = Depends(get_session)):
+def get_profile(token_data: dict = Depends(verify_user), session: Session = Depends(get_session)):
     uid = token_data.get("uid")
     if not uid:
         raise HTTPException(status_code=401, detail="Invalid token data")
@@ -49,7 +49,7 @@ def get_profile(token_data: dict = Depends(verify_token), session: Session = Dep
     }
 
 @router.put("/")
-def update_profile(request: ProfileUpdateRequest, token_data: dict = Depends(verify_token), session: Session = Depends(get_session)):
+def update_profile(request: ProfileUpdateRequest, token_data: dict = Depends(verify_user), session: Session = Depends(get_session)):
     uid = token_data.get("uid")
     
     statement = select(User).where(User.firebase_uid == uid)
